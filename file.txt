@@ -1,0 +1,104 @@
+python:
+import os
+import numpy as np
+import cv2
+from flask import Flask, request, render_template, redirect, url_for
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
+from werkzeug.utils import secure_filename
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Define upload folder
+UPLOAD_FOLDER = 'static/uploads'
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Load the pre-trained model
+MODEL_PATH = 'models/imageclassifier.h5'
+model = load_model(MODEL_PATH)
+
+# Define image size and class names
+img_size = (256, 256)  # Adjust to your model's input size
+class_names = os.listdir('data')  # Class names based on folders in 'data' directory
+
+# Define a mapping of class names to amounts
+class_amounts = {
+    'cloth': 10,  # Example amount (can be kg or any other unit)
+    'paper': 5,
+    'plastic_bags': 2,
+    # Add other classes and their corresponding amounts here
+}
+
+# Function to preprocess and predict the class of the image
+def predict_class(img_path, model):
+    # Load image
+    img = image.load_img(img_path, target_size=img_size)
+
+    # Preprocess image
+    img_array = image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
+    img_array = img_array / 255.0  # Normalize the image (assuming the model was trained on normalized images)
+
+    # Predict
+    predictions = model.predict(img_array)
+    predicted_class_index = np.argmax(predictions, axis=1)[0]  # Get index of max probability
+    predicted_class_label = class_names[predicted_class_index]  # Get the class label from index
+
+    # Get the corresponding amount for the predicted class
+    predicted_amount = class_amounts.get(predicted_class_label, 0)  # Default to 0 if class not found
+
+    return predicted_amount
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        # Check if an image was uploaded
+        if 'file' not in request.files:
+            return redirect(request.url)
+
+        file = request.files['file']
+        if file.filename == '':
+            return redirect(request.url)
+
+        if file:
+            # Save the file to the upload folder
+            filename = secure_filename(file.filename)
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(file_path)
+
+            # Predict the class amount of the uploaded image
+            predicted_amount = predict_class(file_path, model)
+
+            # Render template with the prediction
+            return render_template('index.html', predicted_amount=predicted_amount, image_path=file_path)
+
+    return render_template('index.html')
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+html:
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Classifier</title>
+</head>
+<body>
+    <h1>Image Classifier</h1>
+    <form method="POST" enctype="multipart/form-data">
+        <input type="file" name="file" required>
+        <button type="submit">Upload</button>
+    </form>
+    {% if predicted_amount is not none %}
+        <h2>Predicted Amount: {{ predicted_amount }} units</h2>
+        <img src="{{ image_path }}" alt="Uploaded Image" style="max-width: 300px;">
+    {% endif %}
+</body>
+</html>
