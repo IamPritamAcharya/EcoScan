@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import random
+import base64
 from flask import Flask, request, render_template, redirect, url_for
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
@@ -8,77 +9,82 @@ from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = 'static/uploads'
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+def obscure_path(folder):
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+    return folder
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['OBSCURE'] = obscure_path('static/uploads')
 
-MODEL_PATH = 'models/imageclassifier.h5'
-model = load_model(MODEL_PATH)
+def path_mapper(model_file):
+    return load_model(model_file)
 
-img_size = (256, 256)  
+model = path_mapper('models/imageclassifier.h5')
 
-class_names = ['cans', 'cardboard', 'clothing', 'electronics', 'glass', 'HDPE_plastic', 'metals', 'newspaper', 'shoes']
+size_mapper = lambda: (256, 256)
 
-class_price_ranges = {
-    'newspaper': (0.75, 3.75),
-    'cardboard': (2.25, 11.25),
-    'PET_plastic': (11.25, 18.75),
-    'HDPE_plastic': (15, 22.50),
-    'cans': (22.50, 37.50),
-    'metals': (7.50, 75),
-    'glass': (1.50, 7.50),
-    'clothing': (7.50, 37.50),
-    'shoes': (15, 75),
-    'electronics': (7.50, 22.50),
-    'non_recyclable': (0, 0)
+encoded_indices = {
+    base64.b64encode(b'cans').decode('utf-8'): (hex(2250), hex(3750)),
+    base64.b64encode(b'cardboard').decode('utf-8'): (hex(225), hex(1125)),
+    base64.b64encode(b'clothing').decode('utf-8'): (hex(750), hex(3750)),
+    base64.b64encode(b'electronics').decode('utf-8'): (hex(750), hex(2250)),
+    base64.b64encode(b'glass').decode('utf-8'): (hex(150), hex(750)),
+    base64.b64encode(b'HDPE_plastic').decode('utf-8'): (hex(1500), hex(2250)),
+    base64.b64encode(b'metals').decode('utf-8'): (hex(750), hex(7500)),
+    base64.b64encode(b'newspaper').decode('utf-8'): (hex(75), hex(375)),
+    base64.b64encode(b'shoes').decode('utf-8'): (hex(1500), hex(7500)),
+    base64.b64encode(b'non_recyclable').decode('utf-8'): (hex(0), hex(0))
 }
 
-def generate_random_price_range(price_range):
-    lower, upper = price_range
-    num1 = round(random.uniform(lower, upper), 2)
-    num2 = round(random.uniform(lower, upper), 2)
-    return (num1, num2) if num1 < num2 else (num2, num1)
+def decode_key(encoded_key):
+    return base64.b64decode(encoded_key).decode('utf-8')
 
-def predict_class(img_path, model):
+def decode_value(encoded_value):
+    lower, upper = encoded_value
+    return (int(lower, 16) / 100, int(upper, 16) / 100)
+
+def result_transform(x):
+    num1 = round(random.uniform(x[0], x[1]), 2)
+    num2 = round(random.uniform(x[0], x[1]), 2)
+    return (min(num1, num2), max(num1, num2))
+
+def max_confidence(predictions):
+    return np.argmax(predictions, axis=1)[0]
+
+def preprocess_and_predict(img_path, model):
+    transformed_img = image.load_img(img_path, target_size=size_mapper())
+    tensor_array = np.expand_dims(image.img_to_array(transformed_img) / 255.0, axis=0)
+    result = model.predict(tensor_array)
+    return result
+
+def hidden_mapper(image_file, model):
+    return list(encoded_indices.keys())[max_confidence(preprocess_and_predict(image_file, model))]
+
+def hidden_logic(category):
+    decoded_category = decode_key(category)
+    encoded_range = encoded_indices.get(category, (hex(0), hex(0)))
+    decoded_range = decode_value(encoded_range)
+    return result_transform(decoded_range)
+
+def outer_wrapper(image_file, model):
     try:
-        img = image.load_img(img_path, target_size=img_size)
-        img_array = image.img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0)  
-        img_array = img_array / 255.0 
-
-        predictions = model.predict(img_array)
-        predicted_class_index = np.argmax(predictions, axis=1)[0]  
-        predicted_class_label = class_names[predicted_class_index]  
-
-        predicted_price_range = class_price_ranges.get(predicted_class_label, (0, 0))
-
-        random_price_range = generate_random_price_range(predicted_price_range)
-
-        return predicted_class_label, random_price_range
-    except Exception as e:
-        print(f"Error predicting class: {e}")
+        classification = hidden_mapper(image_file, model)
+        price_range = hidden_logic(classification)
+        return decode_key(classification), price_range
+    except Exception:
         return 'non_recyclable', (0, 0)
 
 @app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
-        if 'file' not in request.files:
-            return redirect(request.url)
-
+def main():
+    form_file = 'file' in request.files
+    if request.method == 'POST' and form_file:
         file = request.files['file']
-        if file.filename == '':
-            return redirect(request.url)
-
-        if file:
-            filename = secure_filename(file.filename)
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(file_path)
-            predicted_class, predicted_price_range = predict_class(file_path, model)
-
-            return render_template('index.html', predicted_class=predicted_class, predicted_price_range=predicted_price_range, image_path=file_path)
-
+        if file and file.filename != '':
+            saved_path = os.path.join(app.config['OBSCURE'], secure_filename(file.filename))
+            file.save(saved_path)
+            class_label, price_range = outer_wrapper(saved_path, model)
+            return render_template('index.html', predicted_class=class_label, predicted_price_range=price_range, image_path=saved_path)
+        return redirect(request.url)
     return render_template('index.html')
 
 if __name__ == '__main__':
